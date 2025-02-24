@@ -7,7 +7,7 @@ from dsp import LM
 import dspy
 from dspy.primitives.assertions import assert_transform_module, backtrack_handler
 import core.dspy_patch
-from core.tools.custom_llama_index import VectorRetriever
+from core.tools.custom_llama_index import VectorRetriever, KeywordRetriever
 from core.dspy_classes.plan import Planner
 from core.dspy_classes.conversation_memory import ConversationMemory
 from core.dspy_classes.tool_memory import ToolMemory
@@ -15,10 +15,11 @@ from core.dspy_classes.query_rewrite import QueryRewrite
 from core.dspy_classes.prompt_settings import VERBOSE
 from core.dspy_classes.synthesizer import Synthesizer
 from core.dspy_classes.judge import Judge
+from tools.email.email import EmailTools
+from tools.search.python_googlesearch import GoogleSearch
 from config import config
 from setup import setup
-
-
+from dspy_classes.polish import Polish
 class CustomClient(LM):
     def __init__(self) -> None:
         self.provider = "default"
@@ -69,32 +70,25 @@ class CustomClient(LM):
 
 class Agent(dspy.Module):
     def __init__(
-        self,
-        max_iterations: int = 5,
-        streaming: bool = False,
-        get_intermediate: bool = False,
-        rewrite_query: bool = False,
+            self,
+            max_iterations: int = 5,
+            streaming: bool = False,
+            get_intermediate: bool = False,
+            rewrite_query: bool = False,
+            polish: bool = False
     ):
         """
-        Args:
-            max_iterations: The maximum rounds of tool call/evaluation the agent
-                could execute for a user message. This includes the first round
-                of tool calls with the initial user message.
-            streaming: If `True`, returns the LLM response as a streaming generator
-                for `reponse` returned by synthesizer, else simply return the
-                complete response as a string.
-            get_itermediate: If `True`, `forward()` would return the synthesized
-                result for each agent iteration as a generator.
+        初始化Agent类，配置最大迭代次数、是否使用流式输出、是否获取中间结果等参数。
         """
-
         super().__init__()
         self.max_iterations = max_iterations
         self.streaming = streaming
         self.get_intermediate = get_intermediate
         self.rewrite_query = rewrite_query
+        self.polish = polish
 
         self.planner = assert_transform_module(
-            Planner([VectorRetriever()]),
+            Planner([VectorRetriever(), EmailTools(), GoogleSearch()]),
             functools.partial(backtrack_handler, max_backtracks=5),
         )
         self.conversation_memory = ConversationMemory()
@@ -106,24 +100,31 @@ class Agent(dspy.Module):
             Judge(), functools.partial(backtrack_handler, max_backtracks=5)
         )
         self.queryrewriter = QueryRewrite()
+        self.polisher = Polish()
 
         self.prev_response = None
+        self.tool_cache = {}  # 新增缓存工具结果
 
     def reset(self):
         self.prev_response = None
         self.conversation_memory = ConversationMemory()
+        self.tool_cache.clear()  # 重置缓存
+
+    def get_tool_result(self, tool, tool_name, query, internal_memory):
+        if tool_name in self.tool_cache:
+            return self.tool_cache[tool_name]
+
+        result = tool(query=query, internal_memory=internal_memory)
+        self.tool_cache[tool_name] = result
+        return result
 
     def _forward_gen(self, current_user_message: str, question_id: str):
 
         limits = self.planner.get_token_limits()
 
-        # Reset tool memory for each user message
         self.tool_memory.reset()
-
-        # Clear internal memory for each user message
         self.internal_memory.clear()
 
-        # Add previous response to conversation memory
         if self.prev_response is not None:
             if self.streaming:
                 r = self.prev_response.get_full_response()
@@ -134,32 +135,24 @@ class Agent(dspy.Module):
                 content=r,
                 max_history_size=limits["conversation_history"],
             )
-        # Deal with DSPy assertions
-        # Reference: https://github.com/stanfordnlp/dspy/blob/af5186cf07ab0b95d5a12690d5f7f90f202bc86e/dspy/predict/retry.py#L59
-        with dspy.settings.lock:
-            dspy.settings.backtrack_to = None
 
-        for (name, model), tool in zip(
-            self.planner.name_to_model.items(), self.planner.tools
-        ):
-
-            r = tool(
-                query=current_user_message, internal_memory=self.internal_memory
-            )
-            first_itr_result, internal_result = r.result, r.internal_result
-            if "ids" in internal_result:
-                self.internal_memory["ids"] = (
-                    self.internal_memory.get("ids", set()) | internal_result["ids"]
-                )
-
-            self.tool_memory(
-                current_user_message=current_user_message,
-                conversation_memory=self.conversation_memory,
-                calls=[model(name=name, params={"query": current_user_message})],
-                result=first_itr_result,
-                max_history_size=limits["tool_history"],
-            )
-
+        # 初始化工具调用
+        # for (name, model), tool in islice(zip(self.planner.name_to_model.items(), self.planner.tools), 1):
+        #
+        #     r = self.get_tool_result(tool, name, current_user_message, self.internal_memory)
+        #     first_itr_result, internal_result = r.result, r.internal_result
+        #     if "ids" in internal_result:
+        #         self.internal_memory["ids"] = (
+        #                 self.internal_memory.get("ids", set()) | internal_result["ids"]
+        #         )
+        #
+        #     self.tool_memory(
+        #         current_user_message=current_user_message,
+        #         conversation_memory=self.conversation_memory,
+        #         calls=[model(name=name, params={"query": current_user_message})],
+        #         result=first_itr_result,
+        #         max_history_size=limits["tool_history"],
+        #     )
 
         synthesizer_args = dict(
             current_user_message=current_user_message,
@@ -168,7 +161,7 @@ class Agent(dspy.Module):
             streaming=self.streaming,
         )
 
-        # The subsequent rounds of tool calling
+        # 后续迭代过程中的工具调用
         for i in range(self.max_iterations - 1):
             if self.get_intermediate:
                 result = self.synthesizer(**synthesizer_args)
@@ -188,6 +181,13 @@ class Agent(dspy.Module):
                     conversation_memory=self.conversation_memory,
                     tool_memory=self.tool_memory,
                 ).rewritten_query
+            elif self.polish:
+                query = current_user_message + " " + self.polisher(
+                    current_user_message=current_user_message,
+                    conversation_memory=self.conversation_memory,
+                    tool_memory=self.tool_memory,
+                ).output
+                current_user_message += query
             else:
                 query = current_user_message
 
@@ -209,11 +209,14 @@ class Agent(dspy.Module):
                 internal_memory=self.internal_memory,
             )
 
-            resuzlt, internal_result = r.result, r.internal_result
+            result, internal_result = r.result, r.internal_result
             if "ids" in internal_result:
                 self.internal_memory["ids"] = (
-                    self.internal_memory.get("ids", set()) | internal_result["ids"]
+                        self.internal_memory.get("ids", set()) | internal_result["ids"]
                 )
+
+            if "search_url" in internal_result:
+                self.internal_memory["search_url"] = list(set(self.internal_memory["search_url"] + internal_result["search_url"]))
 
             self.tool_memory(
                 current_user_message=current_user_message,
@@ -223,6 +226,12 @@ class Agent(dspy.Module):
                 max_history_size=limits["tool_history"],
             )
 
+        synthesizer_args = dict(
+            current_user_message=current_user_message,
+            conversation_memory=self.conversation_memory,
+            tool_memory=self.tool_memory,
+            streaming=self.streaming,
+        )
 
         self.prev_response = self.synthesizer(
             **synthesizer_args
@@ -251,7 +260,7 @@ def main():
     dspy.settings.configure(lm=llama_client)
     import time
 
-    agent = Agent(max_iterations=2, streaming=True, get_intermediate=False, rewrite_query=False)
+    agent = Agent(max_iterations=3, streaming=True, get_intermediate=False, rewrite_query=False, polish=True)
 
     while True:
         try:

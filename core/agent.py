@@ -19,7 +19,8 @@ from tools.email.email import EmailTools
 from tools.search.python_googlesearch import GoogleSearch
 from config import config
 from setup import setup
-from dspy_classes.polish import Polish
+from itertools import islice
+
 class CustomClient(LM):
     def __init__(self) -> None:
         self.provider = "default"
@@ -75,7 +76,6 @@ class Agent(dspy.Module):
             streaming: bool = False,
             get_intermediate: bool = False,
             rewrite_query: bool = False,
-            polish: bool = False
     ):
         """
         初始化Agent类，配置最大迭代次数、是否使用流式输出、是否获取中间结果等参数。
@@ -85,7 +85,6 @@ class Agent(dspy.Module):
         self.streaming = streaming
         self.get_intermediate = get_intermediate
         self.rewrite_query = rewrite_query
-        self.polish = polish
 
         self.planner = assert_transform_module(
             Planner([VectorRetriever(), EmailTools(), GoogleSearch()]),
@@ -100,7 +99,6 @@ class Agent(dspy.Module):
             Judge(), functools.partial(backtrack_handler, max_backtracks=5)
         )
         self.queryrewriter = QueryRewrite()
-        self.polisher = Polish()
 
         self.prev_response = None
         self.tool_cache = {}  # 新增缓存工具结果
@@ -181,13 +179,6 @@ class Agent(dspy.Module):
                     conversation_memory=self.conversation_memory,
                     tool_memory=self.tool_memory,
                 ).rewritten_query
-            elif self.polish:
-                query = current_user_message + " " + self.polisher(
-                    current_user_message=current_user_message,
-                    conversation_memory=self.conversation_memory,
-                    tool_memory=self.tool_memory,
-                ).output
-                current_user_message += query
             else:
                 query = current_user_message
 
@@ -260,7 +251,7 @@ def main():
     dspy.settings.configure(lm=llama_client)
     import time
 
-    agent = Agent(max_iterations=3, streaming=True, get_intermediate=False, rewrite_query=False, polish=True)
+    agent = Agent(max_iterations=3, streaming=True, get_intermediate=False, rewrite_query=False)
 
     while True:
         try:

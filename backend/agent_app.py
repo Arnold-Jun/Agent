@@ -10,8 +10,8 @@ from flask import Response, stream_with_context, jsonify
 
 import dspy
 
-from chatdku.setup import setup, use_phoenix
-from chatdku.core.agent import Agent,CustomClient
+from setup import setup, use_phoenix
+from core.agent import Agent,CustomClient
 
 app = Flask(__name__)
 CORS(app)

@@ -5,14 +5,13 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import dspy
 
-from chatdku.setup import setup, use_phoenix
-from chatdku.core.agent import Agent, CustomClient
+from setup import setup
+from core.agent import Agent, CustomClient
 
 app = Flask(__name__)
 CORS(app)
 
 setup()
-use_phoenix()
 llama_client = CustomClient()
 dspy.settings.configure(lm=llama_client)
 

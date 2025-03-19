@@ -10,7 +10,7 @@ from flask import Response, stream_with_context, jsonify
 
 import dspy
 
-from setup import setup, use_phoenix
+from setup import setup
 from core.agent import Agent,CustomClient
 
 app = Flask(__name__)

@@ -88,7 +88,7 @@ class Agent(dspy.Module):
         self.polish = polish
 
         self.planner = assert_transform_module(
-            Planner([VectorRetriever(), EmailTools(), GoogleSearch()]),
+            Planner([VectorRetriever(), KeywordRetriever() EmailTools(), GoogleSearch()]),
             functools.partial(backtrack_handler, max_backtracks=5),
         )
         self.conversation_memory = ConversationMemory()

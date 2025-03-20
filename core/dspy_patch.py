@@ -182,13 +182,15 @@ def custom_call(self, example, show_guidelines=True) -> str:
             query,
         ]
 
-    prompt = "<|start_header_id|>system<|end_header_id|>\n\n"
-    prompt += "\n\n---\n\n".join([p.strip() for p in parts[:-1] if p])
-    prompt += "<|eot_id|>\n"
-    prompt += "<|start_header_id|>user<|end_header_id|>\n\n"
+    prompt = "<s>[INST] "
+
+    if len(parts) > 1:  
+        system_prompt = "\n\n".join([p.strip() for p in parts[:-1] if p])
+        prompt += f"<<SYS>>\n{system_prompt}\n<</SYS>>\n\n"
+
     prompt += parts[-1].strip()
-    prompt += "<|eot_id|>\n"
-    prompt += "<|start_header_id|>assistant<|end_header_id|>\n\n"
+    prompt += " [/INST]\n"
+
 
     return prompt.strip()
 

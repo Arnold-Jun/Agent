@@ -140,3 +140,106 @@ class VectorRetriever(dspy.Module):
             )
 
 
+class KeywordRetriever(dspy.Module):
+    """Retrieve texts from the database that contain the same keywords in the query which related to Duke Kunshan University."""
+
+    def __init__(self, retriever_top_k: int = 10, reranker_top_n: int = 3):
+        super().__init__()
+        self.client = Redis.from_url("redis://default:WnJU4r2ROwQUB2qztvAJ3wCQbrCNksRr@redis-10193.c44.us-east-1-2.ec2.redns.redis-cloud.com:10193")
+        self.retriever_top_k = retriever_top_k
+
+        schema = IndexSchema.from_yaml(
+            os.path.join(config.module_root_dir, "custom_schema.yaml")
+        )
+        self.index_name = schema.index.name
+
+    def forward(
+        self,
+        query: Annotated[
+            str,
+            Field(
+                description="Keywords that might appear in the answer to the question."
+            ),
+        ],
+        internal_memory: dict,
+    ):
+        # Escape all punctuations, e.g. "can't" -> "can\'t"
+        def escape_strs(strs: list[str]):
+            pattern = f"[{re.escape(string.punctuation)}]"
+            return [
+                re.sub(pattern, lambda match: f"\\{match.group(0)}", s) for s in strs
+            ]
+
+        # Filters stop words
+        def filter_stopwords(tokens: list[str]):
+            return [word for word in tokens if word.lower() not in self.stopwords]
+
+        exclude = list(internal_memory.get("ids", set()))
+
+        try:
+            nltk.data.find("tokenizers/punkt_tab/english")
+        except LookupError:
+            nltk.download("punkt_tab")
+        # Break down the query into tokens
+        tokens = word_tokenize(query)
+        # Remove tokens that are PURELY punctuations
+        orig_keywords = list(
+            filter(lambda token: token not in string.punctuation, tokens)
+        )
+        orig_keywords = filter_stopwords(orig_keywords)
+        orig_keywords = escape_strs(orig_keywords)
+
+        keywords = []
+        weights = []
+        TUPLE_LIMIT = 4
+        BOOST_FACTOR = 2
+        for i in range(1, TUPLE_LIMIT + 1):
+            for combo in combinations(orig_keywords, i):
+                keywords.append(" ".join(combo))
+                weights.append(BOOST_FACTOR ** (i - 1))
+
+        # `|` means searching the union of the words/tokens.
+        # `%` means fuzzy search with Levenshtein distance of 1.
+        # Query attributes are used here to set the weight of the keywords.
+        text_str = " | ".join(
+            [
+                f"({keyword}) => {{ $weight: {weight} }}"
+                for keyword, weight in zip(keywords, weights)
+            ]
+        )
+        query_str = "@text:(" + text_str + ")"
+
+        exclude = escape_strs(exclude)
+        exclude_str = " ".join([f"-@id:({e})" for e in exclude])
+        if exclude_str:
+            query_str += " " + exclude_str
+
+        retriever_top_k = 5
+        query_cmd = (
+            Query(query_str).scorer("BM25").paging(0, retriever_top_k).with_scores()
+        )
+
+        results = self.client.ft(self.index_name).search(query_cmd)
+        try:
+            nodes = [
+                NodeWithScore(
+                    node=TextNode(
+                        id=r.id, text=r.text, metadata={"file_path": r.file_path}
+                    ),
+                    score=r.score,
+                )
+                for r in results.docs
+            ]
+        except:
+            nodes = [
+                NodeWithScore(node=TextNode(id=r.id, text=r.text), score=r.score)
+                for r in results.docs
+            ]
+
+        nodes = simplify_nodes(nodes)
+        result = nodes_to_dicts(nodes)
+
+        return dspy.Prediction(
+            result=result, internal_result={"ids": {r.id for r in results.docs}}
+        )
+

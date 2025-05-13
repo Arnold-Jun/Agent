@@ -12,7 +12,7 @@ class Config:
                 "tokenizer": "C:/Users/zrj/PycharmProjects/Agent/model/Meta-Llama-3.1-8B-Instruct",
                 "tei_url": "http://10.203.44.89:8002",
                 "llm_url": "http://10.201.8.114:8003/v1",
-                "context_window": 64000,
+                "context_window": 60000,
                 "llm_temperature": 0.7,
                 # about load_and_index
                 "data_dir": "../datapool/RAG_data",
